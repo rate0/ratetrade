@@ -1,0 +1,24 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache curl tzdata && rm -rf /var/cache/apk/*
+
+COPY package*.json ./
+COPY tsconfig.json ./
+RUN npm ci --only=production && npm cache clean --force
+
+COPY src/ ./src/
+RUN npm run build
+
+RUN addgroup -g 1001 -S nodejs && adduser -S trading -u 1001
+COPY --chown=trading:nodejs dist/ ./dist/
+COPY --chown=trading:nodejs node_modules/ ./node_modules/
+
+USER trading
+EXPOSE 3002
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3002/health || exit 1
+
+CMD ["node", "dist/service.js", "strategy-engine"]

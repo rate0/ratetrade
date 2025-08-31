@@ -1,0 +1,364 @@
+version: '3.8'
+
+services:
+  # Database Services
+  postgres:
+    image: postgres:15-alpine
+    container_name: trading-bot-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trading_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trading_user} -d ${POSTGRES_DB:-trading_bot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: trading-bot-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: trading-bot-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-trading_user}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-rabbitmq_password}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  # Core Application Services
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.orchestrator
+    container_name: trading-bot-orchestrator
+    environment:
+      - NODE_ENV=production
+      - TZ=${TZ:-Asia/Almaty}
+      - BOT_MODE=${BOT_MODE:-SIM}
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - RABBITMQ_HOST=rabbitmq
+    env_file:
+      - .env
+    ports:
+      - "${ORCHESTRATOR_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  market-data:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.market-data
+    container_name: trading-bot-market-data
+    environment:
+      - NODE_ENV=production
+      - TZ=${TZ:-Asia/Almaty}
+      - REDIS_HOST=redis
+      - RABBITMQ_HOST=rabbitmq
+    env_file:
+      - .env
+    ports:
+      - "${MARKET_DATA_PORT:-3001}:3001"
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  strategy-engine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.strategy-engine
+    container_name: trading-bot-strategy-engine
+    environment:
+      - NODE_ENV=production
+      - TZ=${TZ:-Asia/Almaty}
+      - REDIS_HOST=redis
+      - RABBITMQ_HOST=rabbitmq
+    env_file:
+      - .env
+    ports:
+      - "${STRATEGY_ENGINE_PORT:-3002}:3002"
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  risk-engine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.risk-engine
+    container_name: trading-bot-risk-engine
+    environment:
+      - NODE_ENV=production
+      - TZ=${TZ:-Asia/Almaty}
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - RABBITMQ_HOST=rabbitmq
+    env_file:
+      - .env
+    ports:
+      - "${RISK_ENGINE_PORT:-3003}:3003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  execution-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.execution-service
+    container_name: trading-bot-execution
+    environment:
+      - NODE_ENV=production
+      - TZ=${TZ:-Asia/Almaty}
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - RABBITMQ_HOST=rabbitmq
+    env_file:
+      - .env
+    ports:
+      - "${EXECUTION_SERVICE_PORT:-3004}:3004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  ai-advisor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ai-advisor
+    container_name: trading-bot-ai-advisor
+    environment:
+      - NODE_ENV=production
+      - TZ=${TZ:-Asia/Almaty}
+      - REDIS_HOST=redis
+      - RABBITMQ_HOST=rabbitmq
+    env_file:
+      - .env
+    ports:
+      - "${AI_ADVISOR_PORT:-3005}:3005"
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  notifier:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.notifier
+    container_name: trading-bot-notifier
+    environment:
+      - NODE_ENV=production
+      - TZ=${TZ:-Asia/Almaty}
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - RABBITMQ_HOST=rabbitmq
+    env_file:
+      - .env
+    ports:
+      - "${NOTIFIER_SERVICE_PORT:-3006}:3006"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  # Monitoring and Management
+  nginx:
+    image: nginx:alpine
+    container_name: trading-bot-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - orchestrator
+      - market-data
+      - strategy-engine
+      - risk-engine
+      - execution-service
+      - ai-advisor
+      - notifier
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: trading-bot-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: trading-bot-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  # Utility Services
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: trading-bot-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@trading-bot.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  prometheus_data:
+  grafana_data:
+  pgadmin_data:
+
+networks:
+  trading-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
